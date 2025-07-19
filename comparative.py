@@ -1,53 +1,61 @@
-
 import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="Comparativo SAP x CSOD", layout="wide")
 st.title("📊 Comparativo SAP x CSOD")
 
-# Upload dos arquivos
 col1, col2 = st.columns(2)
 with col1:
-    csod_file = st.file_uploader("📤 Enviar arquivo da CSOD (.xlsx)", type=["xlsx"], key="csod")
+    csod_file = st.file_uploader("📤 Enviar arquivo da CSOD (.xlsx)", type=["xlsx"])
 with col2:
-    sap_file = st.file_uploader("📤 Enviar arquivo do SAP (.xlsx)", type=["xlsx"], key="sap")
+    sap_file = st.file_uploader("📤 Enviar arquivo do SAP (.xlsx)", type=["xlsx"])
 
-# Processamento
 if csod_file and sap_file:
     st.success("Arquivos carregados com sucesso!")
 
-    # CSOD: começa na linha 8, ou seja header=7
+    # CSOD começa na linha 9 (header=8)
     csod = pd.read_excel(csod_file, header=8)
     sap = pd.read_excel(sap_file)
 
-    # Normaliza nomes de colunas
-    # Normaliza nomes de colunas: remove espaços, quebras de linha, múltiplos espaços
-    csod.columns = csod.columns.str.replace(r"\\n|\\r|\\t", "", regex=True)
+    # Normalizar nomes de colunas
+    csod.columns = csod.columns.astype(str).str.replace(r"\n|\r|\t", "", regex=True)
     csod.columns = csod.columns.str.replace(r"\s+", " ", regex=True).str.strip()
-    sap.columns = sap.columns.str.replace(r"\s+", " ", regex=True).str.strip()
+    sap.columns = sap.columns.astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
 
-
-    # Validação
-    required_csod_cols = ["ID do Usuário", "Posição"]
-    required_sap_cols = ["NP", "Cargo"]
-
-    if not all(col in csod.columns for col in required_csod_cols):
-        st.error(f"Arquivo da CSOD deve conter as colunas: {', '.join(required_csod_cols)}")
+    # Validar colunas
+    if "ID do Usuário" not in csod.columns or "Posição ID" not in csod.columns:
+        st.error("Arquivo da CSOD deve conter as colunas: 'ID do Usuário' e 'Posição ID'")
         st.stop()
-    if not all(col in sap.columns for col in required_sap_cols):
-        st.error(f"Arquivo do SAP deve conter as colunas: {', '.join(required_sap_cols)}")
+    if "NP" not in sap.columns or "Cargo - Cód." not in sap.columns:
+        st.error("Arquivo do SAP deve conter as colunas: 'NP' e 'Cargo - Cód.'")
         st.stop()
 
-    # Renomeia para padronizar
-    csod.rename(columns={"ID do Usuário": "ID", "Posição": "Cargo"}, inplace=True)
+    # Renomear colunas para padronizar
+    csod.rename(columns={"ID do Usuário": "ID"}, inplace=True)
     sap.rename(columns={"NP": "ID"}, inplace=True)
 
-    # Limpa os IDs
+
+
+    # Filtrar apenas IDs numéricos
+    csod = csod[csod["ID"].astype(str).str.isnumeric()]
+    sap = sap[sap["ID"].astype(str).str.isnumeric()]
+
+    # Garantir IDs como string padronizados
     csod["ID"] = csod["ID"].astype(str).str.strip()
     sap["ID"] = sap["ID"].astype(str).str.strip()
 
-    # 1. Usuários sem cargo
-    usuarios_sem_cargo = csod[csod["Cargo"].isna() | (csod["Cargo"].astype(str).str.strip() == "")]
+    # Remover o ID "100008" (Carolina Ortega)
+    csod = csod[csod["ID"] != "100008"]
+    sap = sap[sap["ID"] != "100008"]
+
+
+    # Remover ID 100008 e IDs iniciados por '89' ou '70'
+    csod = csod[~csod["ID"].str.startswith(("100008", "89", "70"))]
+    sap = sap[~sap["ID"].str.startswith(("100008", "89", "70"))]
+
+
+    # 1. Usuários sem cargo na CSOD
+    usuarios_sem_cargo = csod[csod["Posição ID"].isna() | (csod["Posição ID"].astype(str).str.strip() == "")]
 
     # 2. CSOD que não existe no SAP
     ids_csod = set(csod["ID"])
@@ -57,16 +65,19 @@ if csod_file and sap_file:
     # 3. SAP que não existe na CSOD
     sap_nao_existe_no_csod = sap[sap["ID"].isin(ids_sap - ids_csod)]
 
-    # 4. Cargos divergentes
-    comparativo = pd.merge(
-        csod[["ID", "Cargo"]],
-        sap[["ID", "Cargo"]],
-        on="ID",
-        how="inner",
-        suffixes=("_CSOD", "_SAP")
-    )
+    # 4. Cargos divergentes usando ID do cargo
+
+    # Extrair IDs e normalizar para string de 8 dígitos
+    csod["Cargo_ID"] = csod["Posição ID"].astype(str).str.split("-").str[0].str.strip().str.zfill(8)
+    sap["Cargo_ID"] = sap["Cargo - Cód."].apply(lambda x: str(int(x)).zfill(8) if pd.notna(x) else "")
+
+    csod_validos = csod[["ID", "Cargo_ID"]].dropna()
+    sap_validos = sap[["ID", "Cargo_ID"]].dropna()
+
+    comparativo = pd.merge(csod_validos, sap_validos, on="ID", how="inner", suffixes=("_CSOD", "_SAP"))
+
     cargos_divergentes = comparativo[
-        comparativo["Cargo_CSOD"].fillna("").str.strip() != comparativo["Cargo_SAP"].fillna("").str.strip()
+        comparativo["Cargo_ID_CSOD"] != comparativo["Cargo_ID_SAP"]
     ]
 
     # Exibição
@@ -79,28 +90,24 @@ if csod_file and sap_file:
 
     with st.expander("👥 Usuários sem cargo na CSOD"):
         st.dataframe(usuarios_sem_cargo)
-
     with st.expander("🔍 CSOD não existe no SAP"):
         st.dataframe(csod_nao_existe_no_sap)
-
     with st.expander("🧾 SAP não existe na CSOD"):
         st.dataframe(sap_nao_existe_no_csod)
-
     with st.expander("⚖️ Cargos divergentes"):
         st.dataframe(cargos_divergentes)
 
-    # Gerar Excel para download
-    with pd.ExcelWriter("comparativo_sap_csod.xlsx", engine="openpyxl") as writer:
+    with pd.ExcelWriter("comparativo_sap_csod_resultado.xlsx", engine="openpyxl") as writer:
         usuarios_sem_cargo.to_excel(writer, index=False, sheet_name="Usuários sem cargo")
         csod_nao_existe_no_sap.to_excel(writer, index=False, sheet_name="CSOD não existe no SAP")
         sap_nao_existe_no_csod.to_excel(writer, index=False, sheet_name="SAP não existe na CSOD")
         cargos_divergentes.to_excel(writer, index=False, sheet_name="Cargos divergentes")
 
-    with open("comparativo_sap_csod.xlsx", "rb") as f:
+    with open("comparativo_sap_csod_resultado.xlsx", "rb") as f:
         st.download_button(
             label="📥 Baixar resultado em Excel",
             data=f,
-            file_name="comparativo_sap_csod.xlsx",
+            file_name="comparativo_sap_csod_resultado.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 else:
