@@ -10,11 +10,24 @@ with col1:
 with col2:
     sap_file = st.file_uploader("📤 Enviar arquivo do SAP (.xlsx)", type=["xlsx"])
 
+def encontrar_header_csod(file):
+    for i in range(10):
+        df_test = pd.read_excel(file, header=i, nrows=1)
+        if "ID do Usuário" in df_test.columns and "Posição ID" in df_test.columns:
+            return i
+    return None
+
 if csod_file and sap_file:
     st.success("Arquivos carregados com sucesso!")
 
-    # CSOD começa na linha 9 (header=8)
-    csod = pd.read_excel(csod_file, header=8)
+    # Detecta a linha do cabeçalho na CSOD
+    header_row = encontrar_header_csod(csod_file)
+    if header_row is None:
+        st.error("Colunas obrigatórias não encontradas no arquivo da CSOD.")
+        st.stop()
+
+    # Leitura dos dados
+    csod = pd.read_excel(csod_file, header=header_row)
     sap = pd.read_excel(sap_file)
 
     # Normalizar nomes de colunas
@@ -22,7 +35,14 @@ if csod_file and sap_file:
     csod.columns = csod.columns.str.replace(r"\s+", " ", regex=True).str.strip()
     sap.columns = sap.columns.astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
 
-    # Validar colunas
+    # 🔍 Debug: Mostrar colunas dos arquivos
+    with st.expander("🔧 Debug - Colunas dos arquivos"):
+        st.write("📄 Colunas CSOD:", list(csod.columns))
+        st.write("📄 Colunas SAP:", list(sap.columns))
+
+
+
+    # Verificar colunas obrigatórias
     if "ID do Usuário" not in csod.columns or "Posição ID" not in csod.columns:
         st.error("Arquivo da CSOD deve conter as colunas: 'ID do Usuário' e 'Posição ID'")
         st.stop()
@@ -33,26 +53,46 @@ if csod_file and sap_file:
     # Renomear colunas para padronizar
     csod.rename(columns={"ID do Usuário": "ID"}, inplace=True)
     sap.rename(columns={"NP": "ID"}, inplace=True)
+# Remover usuários afastados com base na descrição do centro de custo
+    #sap = sap[~sap["Desc. C. Custo"].str.lower().str.contains("afastad", na=False)]
+
+    # Limpeza forte dos IDs
+    def limpar_ids(df, coluna):
+        df[coluna] = (
+            df[coluna]
+            .astype(str)
+            .str.replace(r"\.0$", "", regex=True)  # remove final .0
+            .str.extract(r"(\d+)", expand=False)   # extrai apenas números
+            .str.strip()
+        )
+        return df
+    
+    csod = limpar_ids(csod, "ID")
+    sap = limpar_ids(sap, "ID")
+
+    # Remove IDs inválidos
+    ids_invalidos = ("100008", "89", "70")
+
+    csod = csod[csod["ID"].notna()]
+    # 1. Filtrar IDs com descrição de custo que indicam afastamento
+    ids_afastados = sap[sap["Desc. C. Custo"].str.lower().str.contains("afastad", na=False)]["ID"].unique()
+
+    # 2. Manter apenas IDs válidos e não afastados
+    sap = sap[sap["ID"].notna()]
+    sap = sap[~sap["ID"].isin(ids_afastados)]
+    csod = csod[~csod["ID"].isin(ids_afastados)]
 
 
-
-    # Filtrar apenas IDs numéricos
-    csod = csod[csod["ID"].astype(str).str.isnumeric()]
-    sap = sap[sap["ID"].astype(str).str.isnumeric()]
-
-    # Garantir IDs como string padronizados
-    csod["ID"] = csod["ID"].astype(str).str.strip()
-    sap["ID"] = sap["ID"].astype(str).str.strip()
-
-    # Remover o ID "100008" (Carolina Ortega)
-    csod = csod[csod["ID"] != "100008"]
-    sap = sap[sap["ID"] != "100008"]
+    csod = csod[~csod["ID"].astype(str).str.startswith(ids_invalidos)]
+    sap = sap[~sap["ID"].astype(str).str.startswith(ids_invalidos)]
 
 
-    # Remover ID 100008 e IDs iniciados por '89' ou '70'
-    csod = csod[~csod["ID"].str.startswith(("100008", "89", "70"))]
-    sap = sap[~sap["ID"].str.startswith(("100008", "89", "70"))]
-
+    # 🔍 Debug: IDs válidos
+    with st.expander("🔧 Debug - IDs válidos"):
+        st.write("✅ Total IDs únicos CSOD:", csod["ID"].nunique())
+        st.write("✅ Total IDs únicos SAP:", sap["ID"].nunique())
+        st.write("IDs CSOD exemplo:", csod["ID"].unique()[:5])
+        st.write("IDs SAP exemplo:", sap["ID"].unique()[:5])
 
     # 1. Usuários sem cargo na CSOD
     usuarios_sem_cargo = csod[csod["Posição ID"].isna() | (csod["Posição ID"].astype(str).str.strip() == "")]
@@ -60,25 +100,40 @@ if csod_file and sap_file:
     # 2. CSOD que não existe no SAP
     ids_csod = set(csod["ID"])
     ids_sap = set(sap["ID"])
+
     csod_nao_existe_no_sap = csod[csod["ID"].isin(ids_csod - ids_sap)]
 
     # 3. SAP que não existe na CSOD
     sap_nao_existe_no_csod = sap[sap["ID"].isin(ids_sap - ids_csod)]
 
-    # 4. Cargos divergentes usando ID do cargo
+    # 4. Cargos divergentes (por ID de cargo)
+    def extrair_primeiro_id_cargo(valor):
+        if pd.isna(valor):
+            return ""
+        parte = str(valor).split(",")[0]        # pega o primeiro cargo (antes da vírgula)
+        parte = parte.split("-")[0].strip()     # pega o que está antes do "-" dentro dele
+        return parte.zfill(8)
 
-    # Extrair IDs e normalizar para string de 8 dígitos
-    csod["Cargo_ID"] = csod["Posição ID"].astype(str).str.split("-").str[0].str.strip().str.zfill(8)
+    csod["Cargo_ID"] = csod["Posição ID"].apply(extrair_primeiro_id_cargo)
+
     sap["Cargo_ID"] = sap["Cargo - Cód."].apply(lambda x: str(int(x)).zfill(8) if pd.notna(x) else "")
+
+    # 🔍 Debug: Cargo ID normalizado
+    with st.expander("🔧 Debug - Cargo IDs normalizados"):
+        st.write("CSOD Cargo_ID exemplo:", csod["Cargo_ID"].dropna().unique()[:5])
+        st.write("SAP Cargo_ID exemplo:", sap["Cargo_ID"].dropna().unique()[:5])
 
     csod_validos = csod[["ID", "Cargo_ID"]].dropna()
     sap_validos = sap[["ID", "Cargo_ID"]].dropna()
+    csod_validos = csod[["ID", "Cargo_ID"]].dropna()
+
+    sap_validos = sap[["ID", "Cargo_ID"]].dropna()
+
+    csod_validos = csod_validos[csod_validos["Cargo_ID"].str.strip() != ""]
+    sap_validos = sap_validos[sap_validos["Cargo_ID"].str.strip() != ""]
 
     comparativo = pd.merge(csod_validos, sap_validos, on="ID", how="inner", suffixes=("_CSOD", "_SAP"))
-
-    cargos_divergentes = comparativo[
-        comparativo["Cargo_ID_CSOD"] != comparativo["Cargo_ID_SAP"]
-    ]
+    cargos_divergentes = comparativo[comparativo["Cargo_ID_CSOD"] != comparativo["Cargo_ID_SAP"]]
 
     # Exibição
     st.header("📌 Resumo do Comparativo")
