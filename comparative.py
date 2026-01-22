@@ -70,11 +70,6 @@ if csod_file and sap_file:
     csod = csod[~csod["ID"].astype(str).str.startswith(ids_invalidos)]
     sap = sap[~sap["ID"].astype(str).str.startswith(ids_invalidos)]
 
-    if "Desc. C. Custo" in sap.columns:
-        ids_afastados = sap[sap["Desc. C. Custo"].str.lower().str.contains("afastad", na=False)]["ID"].unique()
-        sap = sap[~sap["ID"].isin(ids_afastados)]
-        csod = csod[~csod["ID"].isin(ids_afastados)]
-
     with st.expander("🔧 Debug - IDs válidos"):
         st.write("✅ Total IDs únicos CSOD:", csod["ID"].nunique())
         st.write("✅ Total IDs únicos SAP:", sap["ID"].nunique())
